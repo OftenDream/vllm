@@ -81,7 +81,7 @@ class ZeroExpertFusedMoE(FusedMoE):
         self.custom_routing_function = custom_routing_function
 
     @contextmanager
-    def _temporarily_set_attrs(self, **attrs):
+    def _temporarily_set_attrs(self, module: nn.Module, **attrs):
         """
         Temporarily set attributes using object.__setattr__ and restore them.
 
@@ -92,14 +92,15 @@ class ZeroExpertFusedMoE(FusedMoE):
         sets the attribute without triggering nn.Module's custom __setattr__,
         allowing Dynamo to trace the code successfully.
         """
-        originals = {key: getattr(self, key) for key in attrs}
+        attrs = {key: value for key, value in attrs.items() if hasattr(module, key)}
+        originals = {key: getattr(module, key) for key in attrs}
         try:
             for key, value in attrs.items():
-                object.__setattr__(self, key, value)
+                object.__setattr__(module, key, value)
             yield
         finally:
             for key, value in originals.items():
-                object.__setattr__(self, key, value)
+                object.__setattr__(module, key, value)
 
     def _compute_zero_expert_result(
         self,
@@ -138,18 +139,26 @@ class ZeroExpertFusedMoE(FusedMoE):
         Returns:
             Combined output from real experts and zero experts
         """
-        # Prepare temporary attribute overrides for routing computation
-        temp_attrs = {
-            "custom_routing_function": None,  # Disable for first routing
-        }
-        if self._router is not None:
-            temp_attrs["e_score_correction_bias"] = self._router.e_score_correction_bias
+        # Prepare temporary router attribute overrides for routing computation.
+        temp_router_attrs: dict[str, object] = {}
+        if hasattr(self.router, "custom_routing_function"):
+            # Disable memoized routing during the first route computation.
+            temp_router_attrs["custom_routing_function"] = None
+        if (
+            self._router is not None
+            and hasattr(self.router, "e_score_correction_bias")
+            and hasattr(self._router, "e_score_correction_bias")
+        ):
+            # Use full bias (including zero experts) when routing over full logits.
+            temp_router_attrs["e_score_correction_bias"] = (
+                self._router.e_score_correction_bias
+            )
 
         # Compute routing with temporary attributes
         # Pass full router_logits (including zero experts) so that zero experts
         # can be properly identified in topk_ids
-        with self._temporarily_set_attrs(**temp_attrs):
-            topk_weights, topk_ids = self.select_experts(
+        with self._temporarily_set_attrs(self.router, **temp_router_attrs):
+            topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,  # Full logits (includes zero experts)
             )
