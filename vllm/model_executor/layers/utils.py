@@ -116,6 +116,8 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
+    if x.numel() == 0:
+        return x.new_empty((*x.shape[:-1], weight.shape[0]))
     return torch.nn.functional.linear(x, weight, bias)
 
 
